@@ -1,0 +1,32 @@
+#pragma kernel FrustumCullInstances 
+
+#include "InstancingFrustumCull.hlsl" // ShaderGraph include file (assumes this is in the same folder)
+// Alternatively, copy structure & buffers. But as we must keep them in sync, it's easier to use an #include
+/*
+struct InstanceData {
+    float4x4 m;
+    // Layout must match C# side
+};
+StructuredBuffer<InstanceData> _PerInstanceData;
+*/
+
+AppendStructuredBuffer<uint> _VisibleIDsAppend; // Buffer that holds the indices of visible instances
+
+float4x4 _Matrix; // (matrix passed in should convert to Clip Space e.g. projection * view * model)
+float _MaxDrawDistance;
+uint _StartOffset;
+
+[numthreads(64, 1, 1)]
+void FrustumCullInstances (uint3 id : SV_DispatchThreadID) {
+    InstanceData data = _PerInstanceData[_StartOffset + id.x];
+    float4 absPosCS = abs(mul(_Matrix, float4(data.m._m03_m13_m23, 1.0)));
+
+    if (   absPosCS.x <= absPosCS.w * 1.1 + 0.5 
+        && absPosCS.y <= absPosCS.w * 1.1 + 0.5	// (scaling/padding hides pop-in/out at screen edges)
+        && absPosCS.z <= absPosCS.w
+        && absPosCS.w <= _MaxDrawDistance		// optional max draw distance
+        ){
+        // Is inside camera frustum
+        _VisibleIDsAppend.Append(_StartOffset + id.x);
+        }
+}
