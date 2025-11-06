@@ -248,7 +248,7 @@ void Instancing_float(float3 Position, out float3 Out){
 [图片]
  在 Graph Settings（Graph Inspector 窗口的选项卡）下，可以启用 Alpha Clipping，将一些块添加到主堆栈中。我已将 Alpha 剪辑阈值保留为 0.5。为了控制 Alpha，我应用了草纹理。为了增加变化，这种纹理包含多种草叶形状，如下图所示：
 [图片]
-        为了随机选择纹理的一部分，可 以使用一个FlipBook节点，将Width和Height都设为2（纹理包含2x2草地tiles）。创建一个Instance ID节点和Random Range节点（设置Min为0，Max为4），将Instance ID节点连接Random Range节点，然后再连接到FlipBook节点中的Tile端口，如下图所示：
+        为了随机选择纹理的一部分，可以使用一个FlipBook节点，将Width和Height都设为2（纹理包含2x2草地tiles）。创建一个Instance ID节点和Random Range节点（设置Min为0，Max为4），将Instance ID节点连接Random Range节点，然后再连接到FlipBook节点中的Tile端口，如下图所示：
 [图片]
         如上所示，我还使用了 Y 平铺为 0.9 的 Tiling And Offset 节点，连接到 Flipbook 上的 UV 端口。这会稍微拉伸纹理，以避免以前的图块从纹理顶部泄漏。
 请注意，在此处使用Instance ID认为Instance是一致的。如果缓冲区已更新，则可能需要在InstanceData 中存储随机值。
@@ -310,8 +310,6 @@ private void Update()
 - 第48行调用Graphics.RenderMeshIndirect方法来绘制mesh实例。
 GPU Frustum Culling
         在RenderMeshIndirect基础上，可以添加 视锥体剔除（Frustum Culling）以防止实例在摄像机视图之外绘制，并可选择限制渲染的距离。
-
-[图片]
 Compute Shader
 首先设置计算着色器，创建一个compute shader，内部代码如下：
 #pragma kernel FrustumCullInstances 
@@ -351,7 +349,8 @@ void FrustumCullInstances (uint3 id : SV_DispatchThreadID) {
         之所以采用这样的方式比较，是因为摄像机在View space剔除视锥体。在投影矩阵之后，该区域是Clip space中的立方体 （至少在 OpenGL 约定中），XYZ 分量范围为 -W 到 W（其中 W 是该位置的第四个分量）。对于 XY 轴，（0,0） 是屏幕中心。对于 Z 轴，-W 位于近平面，W 位于远平面 。（这意味着相机通常处于小于 -W 的某个 Z 距离处。我们通常不需要摄像机在clip space中的位置，但最好有这种参考点来帮助我们可视化空间）
 C#脚本
         需要设置该附加缓冲区，并将其传递给实例化渲染和计算着色器（在检查器中公开并分配）。请注意，属性名称不同，以避免冲突 （在计算着色器中使用#include行） ，因为缓冲区需要在计算着色器中定义为 AppendStructuredBuffer，但在常规着色器中定义为 StructuredBuffer，才能为其编制索引。（因此_VisibleIDsAppend和_VisibleIDs）。
-        
+        在Update中我们在AppendBuffer上通过SetCounterValue(0)方法重置，该计数器会统计缓冲区中有多少个元素。然后将MVP矩阵传递给计算着色器并Dispatch以执行它。若要更新通过实例化调用而被使用的实例个数，可以使用 GraphicsBuffer.CopyCount方法将计数器中的实例数据复制到间接参数缓冲区中。其中的第三个参数需要为1 * sizeof(uint)（相当于值 4），正如实例化对象的数量是缓冲区中的第二个参数一样。copy是发生在GPU上的。
+代码如下：
 public ComputeShader computeFrustumCulling;
 ...
 void SetupInstances(){
@@ -433,3 +432,107 @@ private readonly int prop_Matrix = Shader.PropertyToID("_Matrix");
 
         Graphics.RenderMeshIndirect(rParams, mesh, indirectBuffer, commandCount);
     }
+注意：在创建 ComputeBuffer 时，实际的追加缓冲区大小/长度是固定的。计数器仅允许着色器中的Append()调用覆盖现有数据。如果不重置，追加将继续每帧递增隐藏计数器。它不会越界写入缓冲区，但会导致实例化渲染在崩溃之前绘制许多重叠的实例（因为索引第一个_PerInstanceData 条目）
+Shader Graph
+        需要调整Custom Function节点中使用的HLSL文件来定义VisibleIDs缓冲区（_VisibleIDs），使用 InstanceID 对其进行索引，并使用结果对_PerInstanceData进行索引：
+// InstancingFrustumCull.hlsl
+#ifndef GRASS1_INSTANCED_INCLUDED
+#define GRASS1_INSTANCED_INCLUDED
+
+// Declare structure & buffer for passing per-instance data
+// This must match the C# side
+struct InstanceData {
+    float4x4 m;
+    float4 color;
+};
+StructuredBuffer<InstanceData> _PerInstanceData;
+StructuredBuffer<uint> _VisibleIDs;
+
+#if UNITY_ANY_INSTANCING_ENABLED
+
+    // Based on ParticlesInstancing
+    // https://github.com/Unity-Technologies/Graphics/blob/master/Packages/com.unity.shadergraph/Editor/Generation/Targets/BuiltIn/ShaderLibrary/ParticlesInstancing.hlsl
+    // and/or
+    // https://github.com/TwoTailsGames/Unity-Built-in-Shaders/blob/master/CGIncludes/UnityStandardParticleInstancing.cginc
+
+    void InstancingMatrices(inout float4x4 objectToWorld, out float4x4 worldToObject) {
+       uint index = _VisibleIDs[unity_InstanceID];
+       InstanceData data = _PerInstanceData[index];
+
+        // If matrix is relative to Bounds :
+       objectToWorld = mul(objectToWorld, data.m);
+
+       // Alternatively, if instanced matrices are stored in world space we can override matrix :
+       //objectToWorld = data.m;
+       // This would avoid needing an additional World->Object conversion in the graph
+
+       // ----------
+        // If World->Object transforms are required :
+
+        //worldToObject = transpose(objectToWorld);
+       /*
+          Assuming an orthogonal matrix (no scaling), 
+          the above would be a cheap way to calculate an inverse matrix
+            Otherwise, use the below :
+       */
+          
+       // Calculate Inverse transform matrix :
+       float3x3 w2oRotation;
+       w2oRotation[0] = objectToWorld[1].yzx * objectToWorld[2].zxy - objectToWorld[1].zxy * objectToWorld[2].yzx;
+       w2oRotation[1] = objectToWorld[0].zxy * objectToWorld[2].yzx - objectToWorld[0].yzx * objectToWorld[2].zxy;
+       w2oRotation[2] = objectToWorld[0].yzx * objectToWorld[1].zxy - objectToWorld[0].zxy * objectToWorld[1].yzx;
+
+       float det = dot(objectToWorld[0].xyz, w2oRotation[0]);
+       w2oRotation = transpose(w2oRotation);
+       w2oRotation *= rcp(det);
+       float3 w2oPosition = mul(w2oRotation, -objectToWorld._14_24_34);
+
+       worldToObject._11_21_31_41 = float4(w2oRotation._11_21_31, 0.0f);
+       worldToObject._12_22_32_42 = float4(w2oRotation._12_22_32, 0.0f);
+       worldToObject._13_23_33_43 = float4(w2oRotation._13_23_33, 0.0f);
+       worldToObject._14_24_34_44 = float4(w2oPosition, 1.0f);
+
+        /*
+          This may be quite expensive and this function runs in both vertex and fragment shader
+          (Though if the matrix is unused the compiler might remove? Unsure)
+          Could instead calculate inverse matrices on the CPU side and pass them in too
+          (Though would mean double the GPU memory is needed)
+       */
+    }
+
+    void InstancingSetup() {
+       /* // For HDRP may also need to remove/override these macros. Untested.
+       #undef unity_ObjectToWorld
+       #undef unity_WorldToObject
+       */
+       InstancingMatrices(unity_ObjectToWorld, unity_WorldToObject);
+    }
+
+#endif
+
+// Shader Graph Functions
+
+// Just passes the position through, allows us to actually attach this file to the graph.
+// Should be placed somewhere in the vertex stage, e.g. right before connecting the object space position.
+void InstancingFrustumCull_float(float3 Position, out float3 Out){
+    Out = Position;
+}
+void InstancingFrustumCullFragment_float(float InstanceID, out float4 Out){
+       InstanceData data = _PerInstanceData[InstanceID];
+       Out = data.color;
+}
+// void InstancingFragment_float(out float4 Out){
+//     uint index = _VisibleIDs[unity_InstanceID];
+//     InstanceData data = _PerInstanceData[index];
+//     Out = data.color;
+// }
+void VisibleID_float(uint InstanceID, out float Out){
+       Out = _VisibleIDs[InstanceID];
+}
+#endif
+- 第12行定义StructuredBuffer缓冲区（_VisibleIDs）；
+- 第22-23行使用 InstanceID 对_VisibleIDs缓冲区进行索引，得到的结果对_PerInstanceData进行索引来拿到实例化数据；
+        由于Instance ID不再是一致的，之前在Shader Graph图中将Instance ID节点连接Random Range节点会从纹理中选择一个随机图块，该图块会随着剔除而闪烁，所以我们需要将Random Range节点删除，这样就不会闪烁。如下图所示：
+[图片]
+修改完毕之后，运行程序，运行结果如下图所示：
+[图片]
