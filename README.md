@@ -2,11 +2,11 @@
         本篇介绍使用GPU实例化在URP管线中通过Shader Graph来对草地进行渲染，该方案可以让我们高效渲染上百万个草叶（四边形）。
 GPU Instancing
         GPU Instancing的优点是可以在单个绘制调用中渲染多个对象，通过在图形API下调用这些函数，可以避免很多游戏对象的开销。使用GPU Instancing的条件是网格和材质/着色器需要保持不变，但我们可以通过将数据作为数组或缓冲区传递来拥有不同的每个实例属性（例如位置/矩阵、不同的颜色等），然后使用具有SV_InstanceID语义的变量（输入）在着色器中对其进行索引。
-        通常，在创建场景时，我们倾向于使用相同的着色器渲染许多不同的模型，因此在 URP或HDRP 中，依靠 SRP Batcher 来优化场景的大部分绘制调用可能会更高效。然而，在某些情况下，GPU 实例化可能会更好，我认为渲染草叶（四边形）就是一个很好的例子。使用这些 GPU 实例化函数，你只能根据传入的边界获得整个视锥体剔除。您通常需要通过计算着色器（后面的部分提供了一个示例）或可能在 C# 中处理您自己的每个实例剔除，但可能拆分为块/单元格/四叉树（可能也可以通过Jobs进行多线程）。
+        通常，在创建场景时，我们倾向于使用相同的着色器渲染许多不同的模型，因此在URP或HDRP中，依靠 SRP Batcher 来优化场景的大部分绘制调用可能会更高效。然而，在某些情况下，GPU Instancing可能会更好，我认为渲染草叶（四边形）就是一个很好的例子。使用这些 GPU 实例化函数，你只能根据传入的边界获得整个视锥体剔除。您通常需要通过计算着色器（后面的部分提供了一个示例）或可能在 C# 中处理您自己的每个实例剔除，但可能拆分为块/单元格/四叉树（可能也可以通过Jobs进行多线程）。
 ShaderGraph中的实例化
-        ShaderGraph在Unity2021.2之前对实例化的支持非常有限。在Unity2021.2及之后的版本里公开了一个Instance ID节点(ShaderGraph编辑界面按下空格键即可创建需要的node节点)，但他返回unity_InstanceID始终为0，除非着色器采用以下“instancing paths”（实例化路径）之一：
-1、对于常规实例化（Graphics.RenderMeshInstanced），主要需要在材质上启用GPU Instancing复选框。但这仅限于1023个实例（由于使用数组）并且每帧上传矩阵，因此与其他函数相比，该函数效率较低。
-2、 Graphics.RenderMeshPrimitives和Graphics.RenderMeshIndirect函数，如果着色器支持的话，它们将尝试使用“procedural instancing path”（过程实例化路径）。默认情况下在Shader Graph中是不包括支持的，但我们可以使用几个自定义函数节点来添加。
+        ShaderGraph在Unity2021.2之前对实例化的支持非常有限。在Unity2021.2及之后的版本里公开了一个Instance ID Node(ShaderGraph编辑界面按下空格键即可创建需要的node Node)，但他返回unity_InstanceID始终为0，除非着色器采用以下“instancing paths”（实例化路径）之一：
+1.对于常规实例化（Graphics.RenderMeshInstanced），主要需要在材质上启用GPU Instancing复选框。但这仅限于1023个实例（由于使用数组）并且每帧上传矩阵，因此与其他函数相比，该函数效率较低。
+2. Graphics.RenderMeshPrimitives和Graphics.RenderMeshIndirect函数，如果着色器支持的话，它们将尝试使用“procedural instancing path”（过程实例化路径）。默认情况下在Shader Graph中是不包括支持的，但我们可以使用几个自定义函数 Node来添加。
 RenderMeshPrimitives方式实例化设置
 C#脚本
         首先需要在CPU端进行一些设置来告诉Unity绘制我们的草。创建一个C#脚本并将其附加到场景中的GameObject上。
@@ -141,7 +141,7 @@ public class RenderGrassPrimitives : MonoBehaviour
         Graphics.RenderMeshPrimitives(rParams, mesh, 0, instanceCount);
     }
 }
-- 第8-10行公开出实例化对象个数、需要的Mesh以及材质。
+- 第8-10行inspector公开出实例化对象个数、需要的Mesh以及材质。
 - 第14行引入unity中的RenderParams结构体，该结构体作为第一个参数传递给RenderMeshPrimitives函数。该结构的作用是将一堆与渲染相关的数据（比如worldBounds、shadowCastingMode、receiveShadows、matProps等）收集在一起。
 - 第53-79行声明InstanceData结构体。该结构体包含实例的基本变换矩阵以及获取结构体数据size的静态方法。
 - 第83-123行根据实例化对象个数来设置每个实例对象的数据，其中第120-122行根据实例化对象个数以及每个InstanceData的size创建一个ComputerBuffer对象，并且将InstanceData数据数组设置给该ComputerBuffer对象，最后给MaterialPropertyBlock对象设置Buffer属性。
@@ -151,13 +151,13 @@ Shader Graph
 [图片]
 - Vertex Stage（顶点阶段）
       为了支持实例化，在着色器中使用SV_InstanceID语义来访问渲染的实例。但对于Unity6之前的版本（笔者使用的是2022.3.62f1版本），没有简单方法可以做到这一点。因为它需要包含传递给顶点着色器的结构（Attributes）中，并且作为附加参数传给顶点函数。这些无法在graph中访问，甚至无法通过Custom function访问。
-        但是Shader Graph可以通过添加Custom function节点的方式，来通过自定义函数来执行“instance path”。具体步骤如下：
-1、在shader graph中创建一个Custom Function节点（空格快捷键）；
-2、将Type改为“String”，Name命名为“Procedural”，在Body中填入如下代码，该段代码告诉着色器编译着色器的“procedural instancing”变体；
+        但是Shader Graph可以通过添加Custom function Node的方式，来通过自定义函数来执行“instance path”。具体步骤如下：
+1.在shader graph中创建一个Custom Function Node（空格快捷键）；
+2.将Type改为“String”，Name命名为“Procedural”，在Body中填入如下代码，该段代码告诉着色器编译着色器的“procedural instancing”变体；
 Out = In;
 #pragma multi_compile _ PROCEDURAL_INSTANCING_ON
 #pragma instancing_options procedural:InstancingSetup
-3、添加另一个Custom Function节点，该节点Type选择“File”模式，包含一个带有InstancingSetup函数的HLSL文件，该文件还声明和索引用于传入每个实例数据的compute buffer。该节点Name设置为“Instancing”，具体代码如下：
+3.添加另一个Custom Function Node，该 NodeType选择“File”模式，包含一个带有InstancingSetup函数的HLSL文件，该文件还声明和索引用于传入每个实例数据的compute buffer。该 NodeName设置为“Instancing”，具体代码如下：
 // Instancing.hlsl
 #ifndef GRASS_INSTANCED_INCLUDED
 #define GRASS_INSTANCED_INCLUDED
@@ -239,7 +239,7 @@ void Instancing_float(float3 Position, out float3 Out){
     Out = Position;
 }
 #endif
-4、将上述两个Custom Function节点连接到Vertex阶段的Position端口。法线简单设置为(0,1,0)与Normal端口连接，使草的发现与地形的法线匹配（使其着色（光照）相同）。如下图所示：
+4.将上述两个Custom Function Node连接到Vertex阶段的Position端口。法线简单设置为(0,1,0)与Normal端口连接，使草的发现与地形的法线匹配（使其着色（光照）相同）。如下图所示：
 [图片]
 保存shader graph之后，运行程序可以看到渲染出来的草的实例（8000个实例），如下图所示：
 [图片]
@@ -248,9 +248,9 @@ void Instancing_float(float3 Position, out float3 Out){
 [图片]
  在 Graph Settings（Graph Inspector 窗口的选项卡）下，可以启用 Alpha Clipping，将一些块添加到主堆栈中。我已将 Alpha 剪辑阈值保留为 0.5。为了控制 Alpha，我应用了草纹理。为了增加变化，这种纹理包含多种草叶形状，如下图所示：
 [图片]
-        为了随机选择纹理的一部分，可以使用一个FlipBook节点，将Width和Height都设为2（纹理包含2x2草地tiles）。创建一个Instance ID节点和Random Range节点（设置Min为0，Max为4），将Instance ID节点连接Random Range节点，然后再连接到FlipBook节点中的Tile端口，如下图所示：
+        为了随机选择纹理的一部分，可以使用一个FlipBook Node，将Width和Height都设为2（纹理包含2x2草地tiles）。创建一个Instance ID Node和Random Range Node（设置Min为0，Max为4），将Instance ID Node连接Random Range Node，然后再连接到FlipBook Node中的Tile端口，如下图所示：
 [图片]
-        如上所示，我还使用了 Y 平铺为 0.9 的 Tiling And Offset 节点，连接到 Flipbook 上的 UV 端口。这会稍微拉伸纹理，以避免以前的图块从纹理顶部泄漏。
+        如上所示，我还使用了 Y 平铺为 0.9 的 Tiling And Offset  Node，连接到 Flipbook 上的 UV 端口。这会稍微拉伸纹理，以避免以前的图块从纹理顶部泄漏。
 请注意，在此处使用Instance ID认为Instance是一致的。如果缓冲区已更新，则可能需要在InstanceData 中存储随机值。
         保存shader graph之后，运行程序可以看到渲染出来的草的实例（8000个实例），如下图所示：
 [图片]
@@ -434,7 +434,7 @@ private readonly int prop_Matrix = Shader.PropertyToID("_Matrix");
     }
 注意：在创建 ComputeBuffer 时，实际的追加缓冲区大小/长度是固定的。计数器仅允许着色器中的Append()调用覆盖现有数据。如果不重置，追加将继续每帧递增隐藏计数器。它不会越界写入缓冲区，但会导致实例化渲染在崩溃之前绘制许多重叠的实例（因为索引第一个_PerInstanceData 条目）
 Shader Graph
-        需要调整Custom Function节点中使用的HLSL文件来定义VisibleIDs缓冲区（_VisibleIDs），使用 InstanceID 对其进行索引，并使用结果对_PerInstanceData进行索引：
+        需要调整Custom Function Node中使用的HLSL文件来定义VisibleIDs缓冲区（_VisibleIDs），使用 InstanceID 对其进行索引，并使用结果对_PerInstanceData进行索引：
 // InstancingFrustumCull.hlsl
 #ifndef GRASS1_INSTANCED_INCLUDED
 #define GRASS1_INSTANCED_INCLUDED
@@ -532,7 +532,9 @@ void VisibleID_float(uint InstanceID, out float Out){
 #endif
 - 第12行定义StructuredBuffer缓冲区（_VisibleIDs）；
 - 第22-23行使用 InstanceID 对_VisibleIDs缓冲区进行索引，得到的结果对_PerInstanceData进行索引来拿到实例化数据；
-        由于Instance ID不再是一致的，之前在Shader Graph图中将Instance ID节点连接Random Range节点会从纹理中选择一个随机图块，该图块会随着剔除而闪烁，所以我们需要将Random Range节点删除，这样就不会闪烁。如下图所示：
+        由于Instance ID不再是一致的，之前在Shader Graph图中将Instance ID Node连接Random Range Node会从纹理中选择一个随机图块，该图块会随着剔除而闪烁，所以我们需要将Random Range Node删除，这样就不会闪烁。如下图所示：
 [图片]
-修改完毕之后，运行程序，运行结果如下图所示：
+修改完毕之后，运行程序（笔者渲染了100w个草的实例），运行结果如下图所示：
 [图片]
+示例工程：https://gitee.com/bruce55/gpuinstancedrendergrasses
+参考：https://www.cyanilux.com/tutorials/gpu-instanced-grass-breakdown/
